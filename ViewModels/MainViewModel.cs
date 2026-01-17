@@ -1,6 +1,7 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Security.Principal;
 using System.Windows;
 using System.Windows.Input;
 using WinEnv.Models;
@@ -13,15 +14,24 @@ namespace WinEnv.ViewModels;
 /// </summary>
 public class MainViewModel : ViewModelBase
 {
-    private readonly IEnvironmentVariableService _service;
+    private readonly EnvironmentVariableService _service;
     private EnvironmentVariable? _selectedVariable;
     private string _searchText = string.Empty;
     private ObservableCollection<EnvironmentVariable> _filteredVariables = new();
+    private bool _isSystemMode = false;
+    private readonly bool _isAdmin;
+    private ObservableCollection<PathItem> _pathItems = new();
+    private PathItem? _selectedPathItem;
 
     public MainViewModel()
     {
         _service = new EnvironmentVariableService();
         Variables = new ObservableCollection<EnvironmentVariable>();
+        
+        // 检查是否以管理员身份运行
+        using var identity = WindowsIdentity.GetCurrent();
+        var principal = new WindowsPrincipal(identity);
+        _isAdmin = principal.IsInRole(WindowsBuiltInRole.Administrator);
         
         // 初始化命令
         RefreshCommand = new RelayCommand(Refresh);
@@ -29,6 +39,12 @@ public class MainViewModel : ViewModelBase
         EditCommand = new RelayCommand(Edit, () => SelectedVariable != null);
         DeleteCommand = new RelayCommand(Delete, () => SelectedVariable != null);
         SaveCommand = new RelayCommand(Save);
+        SwitchToUserCommand = new RelayCommand(SwitchToUser);
+        SwitchToSystemCommand = new RelayCommand(SwitchToSystem);
+        AddPathItemCommand = new RelayCommand(AddPathItem);
+        RemovePathItemCommand = new RelayCommand(RemovePathItem, () => SelectedPathItem != null);
+        MovePathItemUpCommand = new RelayCommand(MovePathItemUp, () => SelectedPathItem != null && PathItems.IndexOf(SelectedPathItem) > 0);
+        MovePathItemDownCommand = new RelayCommand(MovePathItemDown, () => SelectedPathItem != null && PathItems.IndexOf(SelectedPathItem) < PathItems.Count - 1);
 
         // 加载数据
         Refresh();
@@ -115,6 +131,102 @@ public class MainViewModel : ViewModelBase
     public ICommand EditCommand { get; }
     public ICommand DeleteCommand { get; }
     public ICommand SaveCommand { get; }
+    public ICommand SwitchToUserCommand { get; }
+    public ICommand SwitchToSystemCommand { get; }
+    public ICommand AddPathItemCommand { get; }
+    public ICommand RemovePathItemCommand { get; }
+    public ICommand MovePathItemUpCommand { get; }
+    public ICommand MovePathItemDownCommand { get; }
+
+    /// <summary>
+    /// 路径项集合
+    /// </summary>
+    public ObservableCollection<PathItem> PathItems
+    {
+        get => _pathItems;
+        set => SetProperty(ref _pathItems, value);
+    }
+
+    /// <summary>
+    /// 选中的路径项
+    /// </summary>
+    public PathItem? SelectedPathItem
+    {
+        get => _selectedPathItem;
+        set
+        {
+            if (SetProperty(ref _selectedPathItem, value))
+            {
+                ((RelayCommand)RemovePathItemCommand).RaiseCanExecuteChanged();
+                ((RelayCommand)MovePathItemUpCommand).RaiseCanExecuteChanged();
+                ((RelayCommand)MovePathItemDownCommand).RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 是否为多值模式（包含分号）
+    /// </summary>
+    private bool _isMultiValue;
+    public bool IsMultiValue
+    {
+        get => _isMultiValue;
+        set => SetProperty(ref _isMultiValue, value);
+    }
+
+    /// <summary>
+    /// 是否为单值模式
+    /// </summary>
+    public bool IsSingleValue => !_isMultiValue;
+
+    /// <summary>
+    /// 是否为系统变量模式
+    /// </summary>
+    public bool IsSystemMode
+    {
+        get => _isSystemMode;
+        set
+        {
+            if (SetProperty(ref _isSystemMode, value))
+            {
+                _service.IsSystemMode = value;
+                OnPropertyChanged(nameof(IsUserMode));
+                OnPropertyChanged(nameof(ModeText));
+                Refresh();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 是否为用户变量模式
+    /// </summary>
+    public bool IsUserMode => !_isSystemMode;
+
+    /// <summary>
+    /// 是否以管理员身份运行
+    /// </summary>
+    public bool IsAdmin => _isAdmin;
+
+    /// <summary>
+    /// 模式文本
+    /// </summary>
+    public string ModeText => _isSystemMode ? "系统变量" : "用户变量";
+
+    /// <summary>
+    /// 切换到用户变量
+    /// </summary>
+    private void SwitchToUser()
+    {
+        IsSystemMode = false;
+    }
+
+    /// <summary>
+    /// 切换到系统变量
+    /// </summary>
+    private void SwitchToSystem()
+    {
+        IsSystemMode = true;
+    }
 
     /// <summary>
     /// 刷新环境变量列表
@@ -151,6 +263,9 @@ public class MainViewModel : ViewModelBase
     {
         EditingVariable = new EnvironmentVariable { IsNew = true };
         EditDialogTitle = "添加环境变量";
+        IsMultiValue = false;
+        PathItems = new ObservableCollection<PathItem>();
+        OnPropertyChanged(nameof(IsSingleValue));
         IsEditing = true;
     }
 
@@ -169,6 +284,22 @@ public class MainViewModel : ViewModelBase
             IsNew = false
         };
         EditDialogTitle = "编辑环境变量";
+        
+        // 检查是否包含分号，决定使用哪种编辑模式
+        IsMultiValue = SelectedVariable.Value.Contains(';');
+        OnPropertyChanged(nameof(IsSingleValue));
+        
+        if (IsMultiValue)
+        {
+            // 拆分为路径列表
+            var paths = SelectedVariable.Value.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            PathItems = new ObservableCollection<PathItem>(paths.Select(p => new PathItem(p.Trim())));
+        }
+        else
+        {
+            PathItems = new ObservableCollection<PathItem>();
+        }
+        
         IsEditing = true;
     }
 
@@ -215,13 +346,24 @@ public class MainViewModel : ViewModelBase
                 return;
             }
 
-            if (EditingVariable.IsNew)
+            // 如果是多值模式，合并路径列表
+            string valueToSave;
+            if (IsMultiValue)
             {
-                _service.Add(EditingVariable.Name, EditingVariable.Value);
+                valueToSave = string.Join(";", PathItems.Select(p => p.Path).Where(p => !string.IsNullOrWhiteSpace(p)));
             }
             else
             {
-                _service.Update(EditingVariable.OriginalName, EditingVariable.Name, EditingVariable.Value);
+                valueToSave = EditingVariable.Value;
+            }
+
+            if (EditingVariable.IsNew)
+            {
+                _service.Add(EditingVariable.Name, valueToSave);
+            }
+            else
+            {
+                _service.Update(EditingVariable.OriginalName, EditingVariable.Name, valueToSave);
             }
 
             IsEditing = false;
@@ -241,5 +383,52 @@ public class MainViewModel : ViewModelBase
     {
         IsEditing = false;
         EditingVariable = null;
+    }
+
+    /// <summary>
+    /// 添加路径项
+    /// </summary>
+    private void AddPathItem()
+    {
+        PathItems.Add(new PathItem());
+    }
+
+    /// <summary>
+    /// 删除路径项
+    /// </summary>
+    private void RemovePathItem()
+    {
+        if (SelectedPathItem != null)
+        {
+            PathItems.Remove(SelectedPathItem);
+        }
+    }
+
+    /// <summary>
+    /// 上移路径项
+    /// </summary>
+    private void MovePathItemUp()
+    {
+        if (SelectedPathItem == null) return;
+        
+        int index = PathItems.IndexOf(SelectedPathItem);
+        if (index > 0)
+        {
+            PathItems.Move(index, index - 1);
+        }
+    }
+
+    /// <summary>
+    /// 下移路径项
+    /// </summary>
+    private void MovePathItemDown()
+    {
+        if (SelectedPathItem == null) return;
+        
+        int index = PathItems.IndexOf(SelectedPathItem);
+        if (index < PathItems.Count - 1)
+        {
+            PathItems.Move(index, index + 1);
+        }
     }
 }

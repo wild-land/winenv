@@ -94,4 +94,17 @@ public partial class MainWindow : Window
             vm.CancelEdit();
         }
     }
+
+    /// <summary>
+    /// 路径文本框获得焦点时选中对应项
+    /// </summary>
+    private void PathTextBox_GotFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.TextBox textBox && 
+            DataContext is MainViewModel vm &&
+            textBox.DataContext is Models.PathItem pathItem)
+        {
+            vm.SelectedPathItem = pathItem;
+        }
+    }
 }

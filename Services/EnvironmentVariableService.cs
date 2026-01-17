@@ -11,14 +11,32 @@ namespace WinEnv.Services;
 /// </summary>
 public class EnvironmentVariableService : IEnvironmentVariableService
 {
-    private const EnvironmentVariableTarget Target = EnvironmentVariableTarget.User;
+    private EnvironmentVariableTarget _target = EnvironmentVariableTarget.User;
+
+    /// <summary>
+    /// 当前环境变量目标（用户/系统）
+    /// </summary>
+    public EnvironmentVariableTarget Target
+    {
+        get => _target;
+        set => _target = value;
+    }
+
+    /// <summary>
+    /// 是否为系统变量模式
+    /// </summary>
+    public bool IsSystemMode
+    {
+        get => _target == EnvironmentVariableTarget.Machine;
+        set => _target = value ? EnvironmentVariableTarget.Machine : EnvironmentVariableTarget.User;
+    }
 
     /// <summary>
     /// 获取所有用户环境变量
     /// </summary>
     public IEnumerable<EnvironmentVariable> GetAll()
     {
-        var variables = Environment.GetEnvironmentVariables(Target);
+        var variables = Environment.GetEnvironmentVariables(_target);
         var result = new List<EnvironmentVariable>();
 
         foreach (DictionaryEntry entry in variables)
@@ -46,7 +64,7 @@ public class EnvironmentVariableService : IEnvironmentVariableService
         if (Exists(name))
             throw new InvalidOperationException($"环境变量 '{name}' 已存在");
 
-        Environment.SetEnvironmentVariable(name, value, Target);
+        Environment.SetEnvironmentVariable(name, value, _target);
     }
 
     /// <summary>
@@ -66,7 +84,7 @@ public class EnvironmentVariableService : IEnvironmentVariableService
             Delete(originalName);
         }
 
-        Environment.SetEnvironmentVariable(newName, value, Target);
+        Environment.SetEnvironmentVariable(newName, value, _target);
     }
 
     /// <summary>
@@ -77,7 +95,7 @@ public class EnvironmentVariableService : IEnvironmentVariableService
         if (string.IsNullOrWhiteSpace(name))
             throw new ArgumentException("环境变量名称不能为空", nameof(name));
 
-        Environment.SetEnvironmentVariable(name, null, Target);
+        Environment.SetEnvironmentVariable(name, null, _target);
     }
 
     /// <summary>
@@ -85,6 +103,6 @@ public class EnvironmentVariableService : IEnvironmentVariableService
     /// </summary>
     public bool Exists(string name)
     {
-        return Environment.GetEnvironmentVariable(name, Target) != null;
+        return Environment.GetEnvironmentVariable(name, _target) != null;
     }
 }
